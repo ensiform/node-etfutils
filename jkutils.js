@@ -177,6 +177,26 @@ jkutils.createSocket = function( callback ) {
 					}
 				}
 			);
+		},
+		"rcon": ( options ) => {
+			if ( !options.ip ) {
+				return callback( 'IP must be specified' );
+			}
+			if ( !options.password ) {
+				return callback( 'RCON password must be specified' );
+			}
+			let port = options.port || 0;
+			let response = Buffer.from( 'rcon ' + options.password + ' ' + options.exec );
+			server.send(
+				[jkutils.oobPrefix, response], port, options.ip,
+				( err ) => {
+					if ( err ) {
+						callback( err );
+						server.close();
+						server = null;
+					}
+				}
+			);
 		}
 	};
 	socket.gameServers = {};
@@ -299,6 +319,10 @@ jkutils.createSocket = function( callback ) {
 					let clients = lines.slice( 1, -1 );
 					socket.emit( 'statusResponse', status, clients, source.ip, source.port );
 				},
+				'print': ( source, msg, offset, stringArgs ) => {
+					let cleanMsg = msg.slice( offset ).toString( 'ascii' );
+					socket.emit( 'print', cleanMsg, source.ip, source.port );
+				},
 			};
 
 			// the rest of the buffer should just be a string, typically space-delimited
@@ -327,6 +351,83 @@ jkutils.createSocket = function( callback ) {
 }
 
 let handlers = {
+	'rcon': ( args ) => {
+		if ( args.length < 3 ) {
+			return console.log( 'usage: rcon <ip[:port]> <password> [args...]' );
+		}
+		let addr = args[1].split( ':' );
+		let ip = addr[0];
+		let port = (addr.length === 2) ? addr[1] : '29060';
+		let password = (args.length >= 3) ? args[2] : '';
+		let execStr = (args.length >= 4) ? args.slice(3).join( ' ' ) : '';
+
+		console.log( 'sending rcon ' + execStr + ' to ' + ip + ':' + port );
+
+		// chains getservers -> getserversResponse
+		jkutils.createSocket(
+			( err, socket ) => {
+				//FIXME: move the socket timeout into jkutils.createSocket with callback?
+				function noResponse() {
+					console.log( 'timeout from ' + ip + ':' + port );
+				}
+				function rconPrintTimeout() {
+					if ( !socket ) {
+						// this has already been done, the timeout is useless
+						return;
+					}
+					noResponse();
+					socket.close();
+					socket = null;
+				}
+				if ( err ) {
+					return console.log( err );
+				}
+
+				let timeoutResponse = {};
+				timeoutResponse[ip+':'+port] = {};
+				if ( !socket ) {
+					noResponse();
+					return;
+				}
+				else {
+					timeoutResponse[ip+':'+port]['rcon'] = setTimeout( rconPrintTimeout, 1000 );
+				}
+
+				console.log( 'rcon to ' + ip + ':' + port );
+				socket.sendServerCommand.rcon(
+					{
+						ip: ip,
+						port: port,
+						password: password,
+						exec: execStr,
+					},
+					( err ) => {
+						if ( err ) {
+							console.log( 'error: ' + err );
+						}
+					}
+				);
+
+				socket.on(
+					'print',
+					( cleanMsg, ip, port ) => {
+						if ( timeoutResponse[ip+':'+port]['print'] ) {
+							clearTimeout( timeoutResponse[ip+':'+port]['print'] );
+							timeoutResponse[ip+':'+port]['print'] = null;
+						}
+
+						console.log( ip + ':' + port + ' responded with:' );
+						console.log( cleanMsg );
+
+						// keep the socket alive again
+						timeoutResponse[ip+':'+port]['print'] = setTimeout( rconPrintTimeout, 5000 );
+					}
+				);
+			}
+		);
+	},
+
+	
 	'getservers': ( args ) => {
 		if ( args.length < 2 ) {
 			return console.log( 'usage: getservers <ip[:port]> [protocol]' );
